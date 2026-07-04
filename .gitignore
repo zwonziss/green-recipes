@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+data/                 # tiny-shakespeare cache, downloaded on first run
+recipes/*/out_full/   # full fine-tune checkpoints (recipe 02)
+recipes/*/out_lora/
+# NOTE: recipes/*/results/*.json are intentionally TRACKED — they are the evidence.
