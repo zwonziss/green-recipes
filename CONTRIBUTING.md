@@ -11,4 +11,6 @@ The whole value of this repo is its consistency. A recipe is accepted when it sa
 
 Style: standard library `argparse`, no config frameworks, seeds fixed with `common.data.set_seed(42)`, warmup steps outside the metered block, `gc.collect()` + `empty_cache()` + a 2 s cooldown between variants. Support `--repeats` (default 3) and aggregate with `common.greenmeter.aggregate_trials()` so `compare()` reports mean ± std, not one noisy number. If the technique makes a quality claim, back it with a held-out metric (`common.eval.lm_perplexity` / `classification_accuracy`) computed outside the metered block, not the raw training loss.
 
+Before opening a PR, run `python tools/green_lint.py recipes/your_recipe` — it's heuristic and non-blocking (the CI job that runs it won't fail your PR), but a finding is worth a second look or a one-line Honesty-box note on why it doesn't apply. `.github/workflows/green-ci.yml` also runs `recipes/00_measure` on your branch vs. `main` and flags CPU wall-time regressions.
+
 Open an issue first if you're unsure whether an idea fits — "it makes the resource cost of a common practice visible and measurable" is the test.

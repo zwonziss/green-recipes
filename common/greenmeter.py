@@ -28,6 +28,12 @@ Design notes / honesty:
   * CO2 uses a grid intensity you can override:  GML_GCO2_PER_KWH=400 python run.py
     Default 450 gCO2/kWh (~global average). Türkiye grid is in the same ballpark.
   * Degrades gracefully: no GPU / no NVML -> you still get wall time.
+  * Hardware: NVIDIA (NVML) is the only backend this repo's own runs are
+    validated against. AMD (ROCm/pyrsmi), Apple Silicon (powermetrics) and
+    Linux CPU (RAPL) backends are implemented against each tool's public
+    docs but have NOT been run on that hardware by this repo -- treat their
+    numbers as unverified until you (or a contributor) confirm them. See
+    "power backend" in env_report() for what was actually detected.
   * Repeats: aggregate_trials() merges N GreenMeter.result dicts into one with
     mean/std per metric. compare()/print_receipt() show "mean +/- std (n=N)"
     and flag deltas with * (95% CIs don't overlap the baseline -- likely real)
@@ -56,12 +62,214 @@ LED_BULB_W = 10.0        # ~ one LED bulb
 
 
 # --------------------------------------------------------------------------- #
-# power sampling thread
+# power backends -- anything with .start() / .read_watts() -> float|None / .stop()
 # --------------------------------------------------------------------------- #
+class _NVMLBackend:
+    """NVIDIA GPUs via NVML (nvidia-ml-py). The only backend validated by
+    real hardware runs in this repo."""
+    name = "nvml"
+
+    def __init__(self, device_index: int = 0):
+        self.device_index = device_index
+        self._pynvml = None
+        self._handle = None
+
+    def start(self):
+        import pynvml
+        pynvml.nvmlInit()
+        self._pynvml = pynvml
+        self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+
+    def read_watts(self):
+        return self._pynvml.nvmlDeviceGetPowerUsage(self._handle) / 1000.0
+
+    def stop(self):
+        pass  # nvmlShutdown() is process-global; leave it initialized
+
+
+class _ROCmBackend:
+    """AMD GPUs via ROCm SMI (pyrsmi). EXPERIMENTAL: written against pyrsmi's
+    documented API (https://github.com/ROCm/pyrsmi), not yet run on real AMD
+    hardware by this repo -- please validate and report back if you have a
+    ROCm card. Requires `pip install pyrsmi` (not in requirements.txt since
+    most users don't have AMD GPUs).
+    """
+    name = "rocm"
+
+    def __init__(self, device_index: int = 0):
+        self.device_index = device_index
+        self._rocml = None
+
+    def start(self):
+        from pyrsmi import rocml
+        rocml.smi_initialize()
+        self._rocml = rocml
+
+    def read_watts(self):
+        # smi_get_device_average_power returns average socket power in Watts
+        return float(self._rocml.smi_get_device_average_power(self.device_index))
+
+    def stop(self):
+        try:
+            self._rocml.smi_shutdown()
+        except Exception:
+            pass
+
+
+class _RAPLBackend:
+    """CPU + DRAM package power via Linux's Intel/AMD RAPL counters
+    (/sys/class/powercap/intel-rapl*), no extra dependency. EXPERIMENTAL:
+    written against the documented sysfs interface, not yet run on real
+    hardware by this repo. Many distros restrict reading these counters to
+    root or a specific group after CVE-2020-8694 -- if `available()` is True
+    but readings never arrive, try running with sudo.
+    """
+    name = "rapl"
+    _ROOT = Path("/sys/class/powercap")
+
+    def __init__(self):
+        self._domains = []       # list of (energy_uj_path, max_range_uj|None)
+        self._last_uj = []
+        self._last_t = None
+
+    def available(self) -> bool:
+        return self._ROOT.exists() and any(self._ROOT.glob("intel-rapl:*"))
+
+    def start(self):
+        for p in sorted(self._ROOT.glob("intel-rapl:*")):
+            # keep only top-level package domains ("intel-rapl:0"), skip
+            # sub-domains ("intel-rapl:0:1" = core/uncore/dram) which the
+            # package total already includes -- avoids double counting.
+            if ":" in p.name[len("intel-rapl:"):]:
+                continue
+            energy_file = p / "energy_uj"
+            if not energy_file.exists():
+                continue
+            max_file = p / "max_energy_range_uj"
+            max_range = int(max_file.read_text()) if max_file.exists() else None
+            self._domains.append((energy_file, max_range))
+        if not self._domains:
+            raise RuntimeError("no readable intel-rapl package domains")
+        self._last_uj = [int(f.read_text()) for f, _ in self._domains]
+        self._last_t = time.perf_counter()
+
+    def read_watts(self):
+        now = time.perf_counter()
+        dt = now - self._last_t
+        if dt <= 0:
+            return None
+        total_delta_uj = 0
+        new_last = []
+        for (f, max_range), prev in zip(self._domains, self._last_uj):
+            cur = int(f.read_text())
+            delta = cur - prev
+            if delta < 0 and max_range:  # 32-bit counter wrapped around
+                delta += max_range
+            total_delta_uj += delta
+            new_last.append(cur)
+        self._last_uj = new_last
+        self._last_t = now
+        return (total_delta_uj / 1e6) / dt  # microjoules -> J, /s -> W
+
+    def stop(self):
+        pass
+
+
+class _AppleBackend:
+    """Apple Silicon combined CPU+GPU+ANE power via `powermetrics`.
+    EXPERIMENTAL: written against powermetrics' documented plist output, not
+    yet run on real Apple Silicon hardware by this repo -- please validate
+    and report back if you have an M-series Mac. Requires sudo: macOS
+    restricts powermetrics to root. Configure a passwordless sudoers rule
+    for powermetrics, or run your script with `sudo python ...`, or this
+    backend silently produces no readings (degrades to wall-time only).
+    """
+    name = "mps"
+
+    def __init__(self, interval_ms: int = 100):
+        self.interval_ms = interval_ms
+        self._proc = None
+        self._reader_thread = None
+        self._latest_w = None
+        self._stop = threading.Event()
+
+    def available(self) -> bool:
+        import shutil
+        return shutil.which("powermetrics") is not None
+
+    def start(self):
+        import subprocess
+        self._proc = subprocess.Popen(
+            ["sudo", "-n", "powermetrics", "--samplers", "cpu_power,gpu_power",
+             "-i", str(self.interval_ms), "--format", "plist"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader_thread.start()
+
+    def _read_loop(self):
+        import plistlib
+        buf = []
+        for line in self._proc.stdout:
+            if self._stop.is_set():
+                break
+            buf.append(line)
+            if line.strip() == "</plist>":
+                try:
+                    doc = plistlib.loads("".join(buf).encode())
+                    proc = doc.get("processor", {})
+                    cpu_mw = proc.get("cpu_power", 0)
+                    gpu_mw = proc.get("gpu_power", 0)
+                    self._latest_w = (cpu_mw + gpu_mw) / 1000.0  # mW -> W
+                except Exception:
+                    pass
+                buf = []
+
+    def read_watts(self):
+        return self._latest_w
+
+    def stop(self):
+        self._stop.set()
+        if self._proc is not None:
+            self._proc.terminate()
+
+
+def _detect_power_backend(device_index: int = 0):
+    """Best-effort autodetect, in order: NVIDIA (NVML) / AMD (ROCm) > Apple
+    Silicon (powermetrics) > Linux CPU (RAPL). Returns None (wall-time-only
+    receipts) if nothing usable is found or every candidate fails to start.
+    """
+    if torch is not None and torch.cuda.is_available():
+        is_rocm = bool(getattr(getattr(torch, "version", None), "hip", None))
+        backend = _ROCmBackend(device_index) if is_rocm else _NVMLBackend(device_index)
+        try:
+            backend.start()
+            return backend
+        except Exception:
+            pass
+    if (torch is not None and getattr(torch.backends, "mps", None) is not None
+            and torch.backends.mps.is_available()):
+        backend = _AppleBackend()
+        if backend.available():
+            try:
+                backend.start()
+                return backend
+            except Exception:
+                pass
+    backend = _RAPLBackend()
+    if backend.available():
+        try:
+            backend.start()
+            return backend
+        except Exception:
+            pass
+    return None
+
+
 class _PowerSampler(threading.Thread):
-    def __init__(self, handle, interval: float = 0.1):
+    def __init__(self, backend, interval: float = 0.1):
         super().__init__(daemon=True)
-        self.handle = handle
+        self.backend = backend
         self.interval = interval
         self.energy_j = 0.0
         self.peak_w = 0.0
@@ -69,14 +277,15 @@ class _PowerSampler(threading.Thread):
         self._stop = threading.Event()
 
     def run(self):
-        import pynvml
         last = time.perf_counter()
         while not self._stop.is_set():
             self._stop.wait(self.interval)
             now = time.perf_counter()
             try:
-                watts = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0
+                watts = self.backend.read_watts()
             except Exception:
+                continue
+            if watts is None:
                 continue
             self.energy_j += watts * (now - last)
             last = now
@@ -96,20 +305,21 @@ class GreenMeter:
         self.device_index = device_index
         self.result: dict = {}
         self._sampler = None
+        self._backend = None
 
     def __enter__(self):
         self.cuda = torch is not None and torch.cuda.is_available()
+        self._mps = (not self.cuda and torch is not None
+                    and getattr(torch.backends, "mps", None) is not None
+                    and torch.backends.mps.is_available())
         if self.cuda:
             torch.cuda.synchronize(self.device_index)
             torch.cuda.reset_peak_memory_stats(self.device_index)
-            try:
-                import pynvml
-                pynvml.nvmlInit()
-                handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
-                self._sampler = _PowerSampler(handle)
-                self._sampler.start()
-            except Exception:
-                self._sampler = None  # no NVML -> time + VRAM only
+
+        self._backend = _detect_power_backend(self.device_index) if torch is not None else None
+        if self._backend is not None:
+            self._sampler = _PowerSampler(self._backend)
+            self._sampler.start()
         self._t0 = time.perf_counter()
         return self
 
@@ -124,14 +334,27 @@ class GreenMeter:
                 torch.cuda.max_memory_allocated(self.device_index) / 2**20, 1
             )
             r["device"] = torch.cuda.get_device_name(self.device_index)
+        elif self._mps:
+            r["device"] = "Apple Silicon (MPS)"
+            try:  # torch.mps memory accounting API varies by torch version
+                r["peak_vram_mb"] = round(torch.mps.driver_allocated_memory() / 2**20, 1)
+            except Exception:
+                pass
+
         if self._sampler is not None:
             self._sampler.stop()
-            self._sampler.join(timeout=1.0)
-            ej = self._sampler.energy_j
-            r["gpu_energy_wh"] = round(ej / 3600.0, 4)
-            r["gpu_avg_power_w"] = round(ej / wall, 1) if wall > 0 else 0.0
-            r["gpu_peak_power_w"] = round(self._sampler.peak_w, 1)
-            r["co2_g"] = round(ej / 3600.0 / 1000.0 * GCO2_PER_KWH, 3)
+            self._sampler.join(timeout=2.0)
+            try:
+                self._backend.stop()
+            except Exception:
+                pass
+            if self._sampler.samples > 0:  # a backend that started but never got
+                ej = self._sampler.energy_j  # a real reading shouldn't report "0 Wh"
+                r["gpu_energy_wh"] = round(ej / 3600.0, 4)
+                r["gpu_avg_power_w"] = round(ej / wall, 1) if wall > 0 else 0.0
+                r["gpu_peak_power_w"] = round(self._sampler.peak_w, 1)
+                r["co2_g"] = round(ej / 3600.0 / 1000.0 * GCO2_PER_KWH, 3)
+                r["power_source"] = self._backend.name
         self.result = r
         return False  # never swallow exceptions
 
@@ -177,8 +400,9 @@ def aggregate_trials(trials: list[dict]) -> dict:
         return r
 
     r: dict = {"label": trials[0].get("label"), "n_trials": len(trials)}
-    if "device" in trials[0]:
-        r["device"] = trials[0]["device"]
+    for passthrough in ("device", "power_source"):
+        if passthrough in trials[0]:
+            r[passthrough] = trials[0][passthrough]
 
     for key in _AGGREGATE_KEYS:
         vals = [t[key] for t in trials if key in t]
@@ -257,6 +481,8 @@ def print_receipt(r: dict):
         eq = equivalents(r["gpu_energy_wh"])
         if eq:
             print(f"  in real life  : {eq}")
+        if r.get("power_source") and r["power_source"] != "nvml":
+            print(f"  power source  : {r['power_source']} (experimental backend, see greenmeter.py)")
     for k, v in r.get("extra", {}).items():
         if k.endswith("_std"):
             continue
@@ -365,35 +591,64 @@ def save_result(result: dict, recipe: str, results_dir, is_baseline: bool = Fals
 # --------------------------------------------------------------------------- #
 # environment doctor (used by recipe 00)
 # --------------------------------------------------------------------------- #
+def _probe_power_backend(device_index: int = 0):
+    """Detect + start a backend, wait long enough for one real sample, read
+    it, then stop. Used only by env_report()'s one-off diagnostic print."""
+    backend = _detect_power_backend(device_index)
+    if backend is None:
+        return None, None
+    time.sleep(0.35)  # let RAPL see a nonzero dt, let powermetrics emit a block
+    try:
+        w = backend.read_watts()
+    except Exception:
+        w = None
+    try:
+        backend.stop()
+    except Exception:
+        pass
+    return backend.name, w
+
+
 def env_report():
     print("\n=== environment check ===")
     if torch is None:
         print("torch          : NOT INSTALLED")
         return
     print(f"torch          : {torch.__version__}")
-    if not torch.cuda.is_available():
-        print("CUDA           : not available (recipes will run in CPU/time-only mode)")
-        return
-    i = 0
-    props = torch.cuda.get_device_properties(i)
-    cap = (props.major, props.minor)
-    print(f"GPU            : {props.name}  ({props.total_memory / 2**30:.1f} GB)")
-    print(f"compute cap.   : sm_{props.major}{props.minor}")
-    print(f"bf16 support   : {torch.cuda.is_bf16_supported()}")
-    print(f"tf32 support   : {cap >= (8, 0)}  (Ampere+)")
-    print(f"flash SDPA     : {'likely (Ampere+)' if cap >= (8, 0) else 'no -> falls back to mem-efficient SDPA'}")
-    try:
-        import pynvml
-        pynvml.nvmlInit()
-        h = pynvml.nvmlDeviceGetHandleByIndex(i)
-        w = pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0
-        print(f"NVML power     : OK (idle draw right now: {w:.0f} W)")
-    except Exception as e:
-        print(f"NVML power     : unavailable ({type(e).__name__}) -> energy column will be empty")
-    try:
-        import bitsandbytes  # noqa: F401
-        print("bitsandbytes   : OK")
-    except Exception:
-        print("bitsandbytes   : not installed (needed for recipes 03 & 08)")
+
+    if torch.cuda.is_available():
+        i = 0
+        props = torch.cuda.get_device_properties(i)
+        cap = (props.major, props.minor)
+        is_rocm = bool(getattr(getattr(torch, "version", None), "hip", None))
+        print(f"GPU            : {props.name}  ({props.total_memory / 2**30:.1f} GB)"
+              + ("  [ROCm]" if is_rocm else ""))
+        if not is_rocm:
+            print(f"compute cap.   : sm_{props.major}{props.minor}")
+            print(f"bf16 support   : {torch.cuda.is_bf16_supported()}")
+            print(f"tf32 support   : {cap >= (8, 0)}  (Ampere+)")
+            print(f"flash SDPA     : {'likely (Ampere+)' if cap >= (8, 0) else 'no -> falls back to mem-efficient SDPA'}")
+        try:
+            import bitsandbytes  # noqa: F401
+            print("bitsandbytes   : OK")
+        except Exception:
+            print("bitsandbytes   : not installed (needed for recipes 03 & 08)")
+    elif (getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()):
+        print("GPU            : Apple Silicon (MPS)")
+        print("note           : bf16/tf32/flash-SDPA checks above are CUDA-specific and don't apply here")
+    else:
+        print("CUDA/MPS       : not available (recipes needing a GPU will exit; "
+              "others run CPU/time-only unless a power backend is found below)")
+
+    name, w = _probe_power_backend(0)
+    if name is None:
+        print("power backend  : none detected -> energy/CO2 columns will be empty")
+    elif w is None:
+        print(f"power backend  : {name} started but produced no reading "
+              "(permissions? try sudo) -> energy/CO2 columns will be empty")
+    else:
+        experimental = "" if name == "nvml" else "  [EXPERIMENTAL -- see greenmeter.py]"
+        print(f"power backend  : {name} OK (idle draw right now: {w:.0f} W){experimental}")
+
     print(f"grid intensity : {GCO2_PER_KWH:.0f} gCO2/kWh (override with GML_GCO2_PER_KWH)")
     print("=========================\n")

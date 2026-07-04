@@ -5,4 +5,13 @@ datasets>=2.20        # recipes 04 & 05 (SST-2)
 peft>=0.11            # recipe 02 (LoRA)
 accelerate>=0.33      # required by transformers' device_map / quantized loading
 bitsandbytes>=0.43    # recipes 03 & 08 — CUDA only
-nvidia-ml-py>=12.535  # provides `pynvml` for GPU power sampling (the receipts)
+nvidia-ml-py>=12.535  # provides `pynvml` for GPU power sampling on NVIDIA (the receipts)
+
+# Optional, hardware-specific power backends (common/greenmeter.py auto-detects;
+# install only the one matching your hardware). EXPERIMENTAL — implemented
+# against each tool's public docs, not yet validated by this repo on real
+# hardware. NVIDIA/NVML above is the only backend this repo's own runs verify.
+# pyrsmi              # AMD GPUs (ROCm) — `pip install pyrsmi`
+# (Apple Silicon needs no package: it shells out to the system `powermetrics`
+#  binary, which requires sudo. Linux CPU/RAPL needs no package either: it
+#  reads /sys/class/powercap directly, which may also need elevated permissions.)

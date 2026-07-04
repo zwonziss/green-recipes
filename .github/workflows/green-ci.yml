@@ -1,0 +1,91 @@
+# Green CI -- annotates PRs with:
+#   1. green-lint: a heuristic static-analysis pass over changed Python for
+#      energy-heavy patterns (tools/green_lint.py). Non-blocking by default.
+#   2. energy-regression: runs recipes/00_measure on the base branch and the
+#      PR branch and diffs them (tools/energy_regression.py). Non-blocking
+#      by default -- see the comment on that job for an important caveat.
+#
+# Both jobs write to the workflow's Job Summary instead of failing the
+# build, matching the "yellow-flag, don't hard-block" idea: these are
+# heuristics, not ground truth.
+
+name: Green CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  green-lint:
+    name: green-lint (heuristic, non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run green-lint
+        run: python tools/green_lint.py --format github recipes common >> "$GITHUB_STEP_SUMMARY"
+        # --strict would exit 1 on any finding and fail this step -- omitted
+        # on purpose. Add it if your team wants a hard gate instead.
+
+  energy-regression:
+    name: energy-regression (CPU-only on GitHub-hosted runners)
+    runs-on: ubuntu-latest
+    # CAVEAT, read before trusting this job's numbers:
+    # GitHub-hosted runners have no NVIDIA/AMD GPU, so recipes/00_measure
+    # falls back to a real CPU matmul burn -- you get a genuine wall-time /
+    # TFLOPS comparison, but the gpu_energy_wh / co2_g rows will always show
+    # "skipped" here (no NVML, and Linux RAPL is very unlikely to be
+    # readable inside a GH-hosted container). To get real GPU energy/CO2
+    # regression testing:
+    #   1. Set up a self-hosted runner with a GPU (see GitHub's docs).
+    #   2. Change `runs-on: ubuntu-latest` below to `runs-on: [self-hosted, gpu]`.
+    #   3. Drop `--cpu-size` from the two benchmark steps so recipe 00 uses
+    #      its GPU `--size` default instead.
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          path: pr
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU-only torch (small, fast download; recipe 00 needs nothing else)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Benchmark base branch
+        run: |
+          python base/recipes/00_measure/run.py \
+            --repeats 3 --seconds 2 --cpu-size 512 \
+            --results-dir "$RUNNER_TEMP/base-results"
+
+      - name: Benchmark PR branch
+        run: |
+          python pr/recipes/00_measure/run.py \
+            --repeats 3 --seconds 2 --cpu-size 512 \
+            --results-dir "$RUNNER_TEMP/pr-results"
+
+      - name: Compare and annotate
+        run: |
+          BASE_JSON=$(ls "$RUNNER_TEMP"/base-results/*.json | head -1)
+          PR_JSON=$(ls "$RUNNER_TEMP"/pr-results/*.json | head -1)
+          python pr/tools/energy_regression.py \
+            --base-result "$BASE_JSON" --pr-result "$PR_JSON" \
+            --threshold-pct 8 --format github >> "$GITHUB_STEP_SUMMARY"
+        # --strict would exit 1 (fail the job) on a real regression --
+        # omitted on purpose; CPU wall-time on a shared GH-hosted runner is
+        # noisy enough that a hard gate at a modest threshold would flake.

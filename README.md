@@ -62,23 +62,34 @@ _No results yet. Run any recipe (start with `python recipes/00_measure/run.py`),
 
 ## How measurement works (and its limits)
 
-A background thread samples GPU board power via NVML every 100 ms and integrates it to energy; peak VRAM comes from PyTorch's allocator; CO2 = energy × grid intensity (default 450 gCO2/kWh, override with `GML_GCO2_PER_KWH`). Full details in [`common/greenmeter.py`](common/greenmeter.py).
+A background thread samples power every 100 ms and integrates it to energy; peak VRAM comes from PyTorch's allocator; CO2 = energy × grid intensity (default 450 gCO2/kWh, override with `GML_GCO2_PER_KWH`). Full details in [`common/greenmeter.py`](common/greenmeter.py).
 
-Be honest about what this is: **GPU-board energy only** (no CPU/RAM/PSU losses, no cooling, no embodied hardware carbon), including idle draw, on tiny models. Absolute numbers are lower bounds; *relative* comparisons between variants on the same machine are fair — and the relative story is the lesson.
+Be honest about what this is: **board/package energy only** (no PSU losses, no cooling, no embodied hardware carbon), including idle draw, on tiny models. Absolute numbers are lower bounds; *relative* comparisons between variants on the same machine are fair — and the relative story is the lesson.
 
-One run can't tell a real effect from GPU clock/thermal jitter, so every recipe supports `--repeats` (default 3): variants are retrained/re-run and aggregated into mean ± std, and comparison tables flag deltas as `*` (95% CIs don't overlap the baseline — likely real) or `~` (they overlap — could be noise). That's a cheap heuristic, not a real hypothesis test, but it beats reading a story into single-run noise. Several recipes also pair the efficiency numbers with a held-out quality metric (perplexity or validation accuracy) instead of a raw training loss, so "cheaper" always comes with "how much worse, if at all."
+One run can't tell a real effect from clock/thermal jitter, so every recipe supports `--repeats` (default 3): variants are retrained/re-run and aggregated into mean ± std, and comparison tables flag deltas as `*` (95% CIs don't overlap the baseline — likely real) or `~` (they overlap — could be noise). That's a cheap heuristic, not a real hypothesis test, but it beats reading a story into single-run noise. Several recipes also pair the efficiency numbers with a held-out quality metric (perplexity or validation accuracy) instead of a raw training loss, so "cheaper" always comes with "how much worse, if at all."
+
+**Power backends:** `GreenMeter` auto-detects, in order, NVIDIA (NVML) → AMD ROCm (pyrsmi) → Apple Silicon (`powermetrics`) → Linux CPU package power (RAPL via `/sys/class/powercap`), and falls back to wall-time-only if none are available. **Only the NVIDIA/NVML path has been run on real hardware by this repo.** ROCm, Apple, and RAPL are implemented against each tool's public docs/interfaces but are unverified — `env_report()` (recipe 00) tells you which backend it actually found and marks non-NVML ones `[EXPERIMENTAL]`. If you have that hardware, please run recipe 00 and open an issue/PR with what you saw, good or bad.
 
 ## Hardware notes
 
-| Capability | Colab T4 (Turing, 16 GB) | RTX 3060 (Ampere, 12 GB) |
-|---|---|---|
-| fp16 + GradScaler | ✅ | ✅ |
-| bf16 | ❌ (auto-skipped) | ✅ |
-| tf32 | ❌ (auto-skipped) | ✅ |
-| Flash SDPA | ❌ → memory-efficient fallback | ✅ |
-| bitsandbytes int8 / nf4 / 8-bit Adam | ✅ | ✅ |
+| Capability | Colab T4 (Turing, 16 GB) | RTX 3060 (Ampere, 12 GB) | Apple Silicon | AMD (ROCm) | Linux CPU-only |
+|---|---|---|---|---|---|
+| fp16 + GradScaler | ✅ | ✅ | partial (MPS) | ✅ | ❌ |
+| bf16 | ❌ (auto-skipped) | ✅ | partial | depends on card | ❌ |
+| tf32 | ❌ (auto-skipped) | ✅ | n/a | n/a | n/a |
+| Flash SDPA | ❌ → memory-efficient fallback | ✅ | ✅ (via SDPA) | depends on card | memory-efficient fallback |
+| bitsandbytes int8 / nf4 / 8-bit Adam | ✅ | ✅ | ❌ (CUDA-only today) | ❌ (CUDA-only today) | ❌ |
+| Power/energy receipts | NVML ✅ | NVML ✅ | `powermetrics`, **experimental**, needs sudo | pyrsmi, **experimental** | RAPL, **experimental**, needs sysfs read access |
 
-Recipes detect capabilities and skip what your card can't do, so both machines produce complete, comparable tables.
+Recipes detect capabilities and skip what your card can't do, so every row above produces complete, comparable tables for the metrics it *can* measure — recipes needing bitsandbytes (03, 08) still require a CUDA GPU regardless of power backend.
+
+## Green CI/CD tooling
+
+Two developer-facing tools, independent of the recipes:
+
+- **`tools/green_lint.py`** — a heuristic static linter (pure `ast`, no GPU needed) that scans Python for energy-heavy patterns and points at the recipe that addresses each one: hand-rolled attention with no SDPA in the file (→ recipe 07), a training loop with no autocast (→ recipe 01), `Adam`/`AdamW` with no 8-bit variant (→ recipe 08), or a full fine-tune with no LoRA/checkpointing (→ recipes 02/06). It's pattern-matching, not type/dataflow analysis — expect false positives and negatives; findings are prompts to look, not verdicts. `python tools/green_lint.py [paths...] [--format github] [--strict]`.
+- **`tools/energy_regression.py`** — diffs two saved result JSONs (e.g. base branch vs. PR branch) and flags lower-is-better metrics that regressed past a threshold. Doesn't run anything itself; feed it two `save_result(...)` outputs.
+- **`.github/workflows/green-ci.yml`** — wires both into a PR check: a lint pass, and an energy-regression pass that runs `recipes/00_measure` on both branches. **Read the caveat in that file** — GitHub-hosted runners have no GPU, so by default this only catches CPU wall-time/TFLOPS regressions; the workflow explains how to point it at a self-hosted GPU runner for real energy/CO2 regression testing. Both jobs annotate the PR's Job Summary and don't fail the build by default (`--strict` on either tool makes it a hard gate instead).
 
 ## Why tiny models?
 
@@ -86,7 +97,7 @@ Because the *mechanisms* are identical at every scale: Adam's 8-bytes-per-parame
 
 ## Roadmap
 
-`torch.compile` · KV-cache tricks & speculative decoding · CPU/edge inference (ONNX, GGUF) · structured / 2:4 sparsity done right · a Colab notebook that runs the whole book · energy-aware hyperparameter search.
+Real-hardware validation of the ROCm/Apple/RAPL power backends (see Hardware notes) · real-time grid carbon intensity (e.g. the UK Carbon Intensity API, keyless and free — deferred so this doesn't ship as a US/EU-only or paywalled feature) · `torch.compile` · KV-cache tricks & speculative decoding · CPU/edge inference (ONNX, GGUF) · structured / 2:4 sparsity done right · a Colab notebook that runs the whole book · energy-aware hyperparameter search.
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The bar: one file, one technique, one honest receipt.
 
