@@ -45,6 +45,16 @@ On Colab: `Runtime → Change runtime type → T4 GPU`, then run the block above
 | 06 | [Gradient checkpointing](recipes/06_gradient_checkpointing/) | Trade compute for memory, then spend the savings on throughput. |
 | 07 | [Flash / SDPA attention](recipes/07_flash_attention/) | Watch O(n²) attention hit the memory wall, then watch one kernel walk through it. |
 | 08 | [The small-GPU stack](recipes/08_smaller_batch_tricks/) | Accumulation + 8-bit Adam + checkpointing: train what "shouldn't fit". |
+| 09 | [torch.compile](recipes/09_torch_compile/) | Pay the compilation tax once, cash in every step after — if you stick around long enough. |
+| 10 | [The KV cache](recipes/10_kv_cache/) | Why generation isn't O(n²) in practice: cache the keys/values, don't recompute them. |
+| 11 | [Speculative decoding](recipes/11_speculative_decoding/) | A tiny model guesses several tokens ahead; the big model just checks its work. |
+| 12 | [2:4 structured sparsity](recipes/12_structured_sparsity/) | The pruning speedup recipe 05 called a myth — real, if the zeros form a pattern. |
+| 13 | [CPU / edge inference (ONNX)](recipes/13_onnx_edge_inference/) | No GPU? Export + quantize for a CPU box, not a data center. |
+| 14 | [Energy-aware hyperparameter search](recipes/14_energy_aware_hpo/) | Stop training the losers — prune bad configs before they finish. |
+| 15 | [DataLoader efficiency](recipes/15_dataloader_efficiency/) | An idle GPU waiting on the CPU still draws power. |
+| 16 | [The batch-size sweep](recipes/16_batch_size_sweep/) | The most efficient batch size and the fastest one aren't always the same one. |
+| 17 | [Stochastic Weight Averaging](recipes/17_weight_averaging/) | An ensemble's accuracy bump for one training run's energy bill. |
+| 18 | [Prefix caching](recipes/18_prefix_caching/) | Stop re-reading the system prompt on every single request. |
 
 Every recipe follows the same contract: **one `run.py`, runs in minutes on a T4, prints receipts + a comparison table, saves JSON results, and its README has an Honesty box** listing where the technique fails or misleads.
 
@@ -79,9 +89,10 @@ One run can't tell a real effect from clock/thermal jitter, so every recipe supp
 | tf32 | ❌ (auto-skipped) | ✅ | n/a | n/a | n/a |
 | Flash SDPA | ❌ → memory-efficient fallback | ✅ | ✅ (via SDPA) | depends on card | memory-efficient fallback |
 | bitsandbytes int8 / nf4 / 8-bit Adam | ✅ | ✅ | ❌ (CUDA-only today) | ❌ (CUDA-only today) | ❌ |
+| 2:4 sparse tensor cores | ❌ (Turing, pre-Ampere — auto-skipped) | ✅ | ❌ | ❌ | ❌ |
 | Power/energy receipts | NVML ✅ | NVML ✅ | `powermetrics`, **experimental**, needs sudo | pyrsmi, **experimental** | RAPL, **experimental**, needs sysfs read access |
 
-Recipes detect capabilities and skip what your card can't do, so every row above produces complete, comparable tables for the metrics it *can* measure — recipes needing bitsandbytes (03, 08) still require a CUDA GPU regardless of power backend.
+Recipes detect capabilities and skip what your card can't do, so every row above produces complete, comparable tables for the metrics it *can* measure — recipes needing bitsandbytes (03, 08) still require a CUDA GPU regardless of power backend, recipe 12's 2:4 sparse kernels need Ampere+ specifically (T4 auto-skips), and recipe 13 (ONNX/CPU) deliberately runs on CPU only, GPU or not.
 
 ## Green CI/CD tooling
 
@@ -97,7 +108,9 @@ Because the *mechanisms* are identical at every scale: Adam's 8-bytes-per-parame
 
 ## Roadmap
 
-Real-hardware validation of the ROCm/Apple/RAPL power backends (see Hardware notes) · real-time grid carbon intensity (e.g. the UK Carbon Intensity API, keyless and free — deferred so this doesn't ship as a US/EU-only or paywalled feature) · `torch.compile` · KV-cache tricks & speculative decoding · CPU/edge inference (ONNX, GGUF) · structured / 2:4 sparsity done right · a Colab notebook that runs the whole book · energy-aware hyperparameter search.
+Real-hardware validation of the ROCm/Apple/RAPL power backends (see Hardware notes) · real-time grid carbon intensity (e.g. the UK Carbon Intensity API, keyless and free — deferred so this doesn't ship as a US/EU-only or paywalled feature) · GGUF export for llama.cpp-style edge deployment (recipe 13 covers ONNX; GGUF is still open) · a Colab notebook that runs the whole book.
+
+`torch.compile` (09), KV-cache tricks (10) & speculative decoding (11), structured 2:4 sparsity (12), CPU/edge inference via ONNX (13), and energy-aware hyperparameter search (14) are now covered — see the recipe table above.
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The bar: one file, one technique, one honest receipt.
 

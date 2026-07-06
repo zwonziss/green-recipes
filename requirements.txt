@@ -1,11 +1,13 @@
 # Core (Colab already ships torch — you can skip reinstalling it there)
-torch>=2.3            # torch.amp.GradScaler(device=...) API
-transformers>=4.44
-datasets>=2.20        # recipes 04 & 05 (SST-2)
+torch>=2.3            # torch.amp.GradScaler(device=...) API, torch.compile (09), torch.sparse semi-structured (12)
+transformers>=4.44    # assisted generation / assistant_model= (11) needs a reasonably recent version
+datasets>=2.20        # recipes 04, 05, 13 & 17 (SST-2)
 peft>=0.11            # recipe 02 (LoRA)
 accelerate>=0.33      # required by transformers' device_map / quantized loading
 bitsandbytes>=0.43    # recipes 03 & 08 — CUDA only
 nvidia-ml-py>=12.535  # provides `pynvml` for GPU power sampling on NVIDIA (the receipts)
+onnx>=1.16            # recipe 13 — CPU/edge inference export
+onnxruntime>=1.18     # recipe 13 — CPU/edge inference runtime + dynamic quantization
 
 # Optional, hardware-specific power backends (common/greenmeter.py auto-detects;
 # install only the one matching your hardware). EXPERIMENTAL — implemented

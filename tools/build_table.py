@@ -17,7 +17,10 @@ CORE = [("wall_s", "time (s)"), ("peak_vram_mb", "VRAM (MB)"),
 EXTRA_ORDER = ["final_loss", "tokens_per_s", "val_accuracy", "ppl",
                "wh_per_1k_tok", "weights_vram_mb", "true_sparsity",
                "gzip_ckpt_mb", "ms_per_example", "trainable_params_m",
-               "disk_mb", "effective_bs", "achieved_tflops"]
+               "disk_mb", "effective_bs", "achieved_tflops",
+               "compile_tax_s", "new_tokens", "ms_per_call", "best_val_ppl",
+               "best_lr", "rung_units_trained", "loader_startup_s",
+               "num_workers", "batch_size", "ms_per_request", "n_requests"]
 
 
 def fmt(v, std=None):
