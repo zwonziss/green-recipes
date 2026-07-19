@@ -1,0 +1,27 @@
+{
+  "label": "eager",
+  "wall_s": 2614.18,
+  "extra": {
+    "final_loss": 3.5709,
+    "eval_ppl": 39.692,
+    "tokens_per_s": 3,
+    "compile_tax_s": 654.45
+  },
+  "n_trials": 1,
+  "trials": [
+    {
+      "label": "eager",
+      "wall_s": 2614.18,
+      "extra": {
+        "final_loss": 3.5709,
+        "eval_ppl": 39.692,
+        "tokens_per_s": 3,
+        "compile_tax_s": 654.45
+      }
+    }
+  ],
+  "recipe": "09_torch_compile",
+  "is_baseline": true,
+  "timestamp": "2026-07-06T13:45:01+00:00",
+  "grid_gco2_per_kwh": 450.0
+}

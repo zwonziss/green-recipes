@@ -20,7 +20,11 @@ EXTRA_ORDER = ["final_loss", "tokens_per_s", "val_accuracy", "ppl",
                "disk_mb", "effective_bs", "achieved_tflops",
                "compile_tax_s", "new_tokens", "ms_per_call", "best_val_ppl",
                "best_lr", "rung_units_trained", "loader_startup_s",
-               "num_workers", "batch_size", "ms_per_request", "n_requests"]
+               "num_workers", "batch_size", "ms_per_request", "n_requests",
+               "padding_ratio", "n_examples", "avg_new_tokens", "n_prompts",
+               "cache_mb", "max_abs_diff", "prefix_tokens", "generate_calls",
+               "hit_rate", "accuracy", "avg_layers_run", "threshold",
+               "n_steps", "vocab_used", "vocab_total", "prune_ratio"]
 
 
 def fmt(v, std=None):

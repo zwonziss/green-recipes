@@ -104,14 +104,25 @@ def main():
     for label, compiled in (("eager", False), ("compiled", True)):
         print(f"\n### {label} ###")
         trials = []
-        for t in range(args.repeats):
-            if args.repeats > 1:
-                print(f" -- trial {t + 1}/{args.repeats} --")
-            r, losses = run_variant(label, compiled, batches, eval_batches,
-                                    device, args.lr, args.compile_mode)
-            if label not in first_losses:
-                first_losses[label] = losses
-            trials.append(r)
+        try:
+            for t in range(args.repeats):
+                if args.repeats > 1:
+                    print(f" -- trial {t + 1}/{args.repeats} --")
+                r, losses = run_variant(label, compiled, batches, eval_batches,
+                                        device, args.lr, args.compile_mode)
+                if label not in first_losses:
+                    first_losses[label] = losses
+                trials.append(r)
+        except Exception as e:
+            if not compiled:
+                raise  # the eager path has no excuse to fail
+            print(f"  torch.compile failed on this machine ({type(e).__name__}: {e}) "
+                  "-- skipping the compiled variant. This is a known rough edge "
+                  "(e.g. no C/C++ compiler backend for TorchInductor), not a bug "
+                  "in this script -- see the Honesty box.")
+            print("\nOnly the eager receipt is available -- torch.compile itself "
+                  "is the thing under test, and it didn't work here.")
+            return
         r = aggregate_trials(trials)
         print_receipt(r)
         results.append(r)

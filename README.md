@@ -55,6 +55,16 @@ On Colab: `Runtime → Change runtime type → T4 GPU`, then run the block above
 | 16 | [The batch-size sweep](recipes/16_batch_size_sweep/) | The most efficient batch size and the fastest one aren't always the same one. |
 | 17 | [Stochastic Weight Averaging](recipes/17_weight_averaging/) | An ensemble's accuracy bump for one training run's energy bill. |
 | 18 | [Prefix caching](recipes/18_prefix_caching/) | Stop re-reading the system prompt on every single request. |
+| 19 | [Length-bucketed batching](recipes/19_length_bucketing/) | A batch's width is set by its longest sequence — sort by length first and padding waste collapses. |
+| 20 | [Stop generating when you're done](recipes/20_generation_stopping/) | `min_new_tokens == max_new_tokens` silently disables early stopping — and pays for it every request. |
+| 21 | [Batched decoding](recipes/21_batched_decoding/) | A for-loop over N requests wastes the GPU; one padded batch keeps it fed. |
+| 22 | [KV-cache quantization](recipes/22_kv_cache_quantization/) | The cache is just tensors — quantize it too, for a longer context in the same VRAM. |
+| 23 | [CPU-offloaded activations](recipes/23_activation_offloading/) | Recipe 06 traded compute for memory; this one trades PCIe bandwidth for the same memory instead. |
+| 24 | [Merging LoRA adapters](recipes/24_lora_merging/) | Recipe 02's training-time trick has its own inference-time bill — merging erases it. |
+| 25 | [Exact-match response caching](recipes/25_response_caching/) | Real traffic repeats — a dict cache turns a repeat into a lookup, not a generation. |
+| 26 | [Early-exit classification](recipes/26_early_exit_classification/) | Not every input needs the same depth — stop computing once you're confident. |
+| 27 | [Deduplicating training data](recipes/27_data_deduplication/) | Duplicate examples burn gradient steps re-teaching what's already learned. |
+| 28 | [Vocabulary pruning](recipes/28_embedding_pruning/) | Your domain uses a sliver of the tokenizer's vocabulary — shrink the output head to match. |
 
 Every recipe follows the same contract: **one `run.py`, runs in minutes on a T4, prints receipts + a comparison table, saves JSON results, and its README has an Honesty box** listing where the technique fails or misleads.
 
